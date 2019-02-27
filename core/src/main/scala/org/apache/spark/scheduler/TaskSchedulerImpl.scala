@@ -358,9 +358,8 @@ private[spark] class TaskSchedulerImpl(
   }
 
   /**
-    * 由cluster manager 调用 提供slaves上的资源，
-    * 我们通过按优先顺序询问我们的活跃的任务集来执行任务
-    * 我们以轮询方式为每个节点指派任务，以便在整个集群中平衡任务。
+    * 调用者是SchedulerBackend, 用途是底层资源SchedulerBackend会把空余的workers资源给TaskScheduler,
+    * 让其根据策略为排队的任务分配合理的cpu 和内存资源, 然后把任务描述列表回传给SchedulerBackend
    */
   def resourceOffers(offers: IndexedSeq[WorkerOffer]): Seq[Seq[TaskDescription]] = synchronized {
     // 标记每个slave是可用的并且记录它的hostname
@@ -370,6 +369,7 @@ private[spark] class TaskSchedulerImpl(
       if (!hostToExecutors.contains(o.host)) {
         hostToExecutors(o.host) = new HashSet[String]()
       }
+      //从 worker offers里收集executor和host对应信息，还有active、executors等。
       if (!executorIdToRunningTaskIds.contains(o.executorId)) {
         hostToExecutors(o.host) += o.executorId
         executorAdded(o.executorId, o.host)
@@ -377,6 +377,7 @@ private[spark] class TaskSchedulerImpl(
         executorIdToRunningTaskIds(o.executorId) = HashSet[Long]()
         newExecAvail = true
       }
+      //收集机架信息
       for (rack <- getRackForHost(o.host)) {
         hostsByRack.getOrElseUpdate(rack, new HashSet[String]()) += o.host
       }
@@ -385,8 +386,13 @@ private[spark] class TaskSchedulerImpl(
     // Before making any offers, remove any nodes from the blacklist whose blacklist has expired. Do
     // this here to avoid a separate thread and added synchronization overhead, and also because
     // updating the blacklist is only relevant when task offers are being made.
+    /**
+      * 在提供资源之前，删除黑名单中的节点。
+      * 这样做事为了避免单独线程增加同步开销，而且因为更新黑名单仅在进行任务提交时提供相关信息
+      */
     blacklistTrackerOpt.foreach(_.applyBlacklistTimeout())
 
+    //过滤掉黑名单中的节点
     val filteredOffers = blacklistTrackerOpt.map { blacklistTracker =>
       offers.filter { offer =>
         !blacklistTracker.isNodeBlacklisted(offer.host) &&
@@ -394,10 +400,13 @@ private[spark] class TaskSchedulerImpl(
       }
     }.getOrElse(offers)
 
+    //worker offers资源列表进行shuffle, 任务列表里的任务列表依据调度策略进行依次排序
     val shuffledOffers = shuffleOffers(filteredOffers)
-    // Build a list of tasks to assign to each worker.
+    // 构建一个分配给每个worker的task list.
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores / CPUS_PER_TASK))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
+    // 为每个taskSeethe提供可用的cpu核数,看是否满足
+    // CPUS_PER_TASK  默认一个task需要一个cpu, 设置参数为spark.task.cpus=1
     val availableSlots = shuffledOffers.map(o => o.cores / CPUS_PER_TASK).sum
     val sortedTaskSets = rootPool.getSortedTaskSetQueue
     for (taskSet <- sortedTaskSets) {
@@ -408,21 +417,23 @@ private[spark] class TaskSchedulerImpl(
       }
     }
 
-    // Take each TaskSet in our scheduling order, and then offer it each node in increasing order
-    // of locality levels so that it gets a chance to launch local tasks on all of them.
-    // NOTE: the preferredLocality order: PROCESS_LOCAL, NODE_LOCAL, NO_PREF, RACK_LOCAL, ANY
+    /**
+      * 按照我们的调度顺序获取每个TaskSet，然后按地点级别的递增顺序为每个节点提供它，以便它有机会在所有节点上启动本地任务。
+      * 注意：首选的位置顺序：PROCESS_LOCAL，NODE_LOCAL，NO_PREF，RACK_LOCAL，ANY
+      */
     for (taskSet <- sortedTaskSets) {
-      // Skip the barrier taskSet if the available slots are less than the number of pending tasks.
+      // 跳过barrier taskSet 如果available slots 的数量小于pending tasks.
       if (taskSet.isBarrier && availableSlots < taskSet.numTasks) {
-        // Skip the launch process.
+        // 跳过启动过程.
         // TODO SPARK-24819 If the job requires more slots than available (both busy and free
         // slots), fail the job on submit.
         logInfo(s"Skip current round of resource offers for barrier stage ${taskSet.stageId} " +
           s"because the barrier taskSet requires ${taskSet.numTasks} slots, while the total " +
           s"number of available slots is $availableSlots.")
       } else {
+        //启动任务标识
         var launchedAnyTask = false
-        // Record all the executor IDs assigned barrier tasks on.
+        // 记录了所有executor id上分配的barrier tasks
         val addressesWithDescs = ArrayBuffer[(String, TaskDescription)]()
         for (currentMaxLocality <- taskSet.myLocalityLevels) {
           var launchedTaskAtCurrentMaxLocality = false
@@ -433,23 +444,22 @@ private[spark] class TaskSchedulerImpl(
           } while (launchedTaskAtCurrentMaxLocality)
         }
 
-        if (!launchedAnyTask) {
+        if (!launchedAnyTask) { //任务是不可调度的
           taskSet.getCompletelyBlacklistedTaskIfAny(hostToExecutors).foreach { taskIndex =>
-              // If the taskSet is unschedulable we try to find an existing idle blacklisted
-              // executor. If we cannot find one, we abort immediately. Else we kill the idle
-              // executor and kick off an abortTimer which if it doesn't schedule a task within the
-              // the timeout will abort the taskSet if we were unable to schedule any task from the
-              // taskSet.
-              // Note 1: We keep track of schedulability on a per taskSet basis rather than on a per
-              // task basis.
-              // Note 2: The taskSet can still be aborted when there are more than one idle
-              // blacklisted executors and dynamic allocation is on. This can happen when a killed
-              // idle executor isn't replaced in time by ExecutorAllocationManager as it relies on
-              // pending tasks and doesn't kill executors on idle timeouts, resulting in the abort
-              // timer to expire and abort the taskSet.
-              executorIdToRunningTaskIds.find(x => !isExecutorBusy(x._1)) match {
+
+            /**
+              * 如果taskSet是不可调度的，我们试着寻找一个现在空闲黑名单executor。
+              * 如果找不到就会立即终止。
+              * 否则我们会终止空闲executor并启动一个abortTimer，如果它没有在超时内安排任务，那么我们无法从taskSet安排任何任务，则会中止taskSet。
+              * 注意1：我们基于每个任务集而不是基于每个任务来跟踪可调度性。
+              * 注意2：当有多个空闲的列入黑名单的executor启用了动态分配时，仍可以中止taskSet。
+              * 当ExecutorAllocationManager没有及时替换被杀死的空闲executor时，会发生这种情况，
+              * 因为它依赖于挂起的任务，并且不会在空闲超时时终止执行程序，从而导致中止计时器到期并中止taskset。
+              */
+          executorIdToRunningTaskIds.find(x => !isExecutorBusy(x._1)) match {
                 case Some ((executorId, _)) =>
                   if (!unschedulableTaskSetToExpiryTime.contains(taskSet)) {
+                    //杀掉黑名单executor
                     blacklistTrackerOpt.foreach(blt => blt.killBlacklistedIdleExecutor(executorId))
 
                     val timeout = conf.get(config.UNSCHEDULABLE_TASKSET_TIMEOUT) * 1000
@@ -459,28 +469,28 @@ private[spark] class TaskSchedulerImpl(
                     abortTimer.schedule(
                       createUnschedulableTaskSetAbortTimer(taskSet, taskIndex), timeout)
                   }
-                case None => // Abort Immediately
+                case None => // 立即终止
                   logInfo("Cannot schedule any task because of complete blacklisting. No idle" +
                     s" executors can be found to kill. Aborting $taskSet." )
                   taskSet.abortSinceCompletelyBlacklisted(taskIndex)
               }
           }
         } else {
-          // We want to defer killing any taskSets as long as we have a non blacklisted executor
-          // which can be used to schedule a task from any active taskSets. This ensures that the
-          // job can make progress.
-          // Note: It is theoretically possible that a taskSet never gets scheduled on a
-          // non-blacklisted executor and the abort timer doesn't kick in because of a constant
-          // submission of new TaskSets. See the PR for more details.
+          /**
+            * 我们希望推迟杀死任何taskSets，只要我们有一个非黑名单的executor，可以用来从任何活动的taskSet调度任务。
+            * 这可确保作业可以取得进展。
+            * 注意：从理论上讲，taskSet永远不会在非黑名单的执行程序上进行调度，并且由于不断提交新的TaskSet，中止计时器不会启动。 有关更多详细信息。
+            */
           if (unschedulableTaskSetToExpiryTime.nonEmpty) {
             logInfo("Clearing the expiry times for all unschedulable taskSets as a task was " +
               "recently scheduled.")
+            //将清理所有到期不可调度任务作为最近的一个task
             unschedulableTaskSetToExpiryTime.clear()
           }
         }
-
+        //
         if (launchedAnyTask && taskSet.isBarrier) {
-          // Check whether the barrier tasks are partially launched.
+          // 检查barrier stage 是否部分启动。
           // TODO SPARK-24818 handle the assert failure case (that can happen when some locality
           // requirements are not fulfilled, and we should revert the launched tasks).
           require(addressesWithDescs.size == taskSet.numTasks,
@@ -489,12 +499,12 @@ private[spark] class TaskSchedulerImpl(
               s"${taskSet.numTasks} tasks got resource offers. The resource offers may have " +
               "been blacklisted or cannot fulfill task locality requirements.")
 
-          // materialize the barrier coordinator.
+          // 实现障碍协调员.
           maybeInitBarrierCoordinator()
 
-          // Update the taskInfos into all the barrier task properties.
+          // 将taskInfos 更新到为所有barrier task 属性中。
           val addressesStr = addressesWithDescs
-            // Addresses ordered by partitionId
+            // 根据partitionId排序的地址
             .sortBy(_._2.partitionId)
             .map(_._1)
             .mkString(",")
@@ -507,12 +517,13 @@ private[spark] class TaskSchedulerImpl(
     }
 
     // TODO SPARK-24823 Cancel a job that contains barrier stage(s) if the barrier tasks don't get
-    // launched within a configured time.
+    // 在配置的时间内启动.
     if (tasks.size > 0) {
       hasLaunchedTask = true
     }
     return tasks
   }
+///===========================================end ==================================
 
   private def createUnschedulableTaskSetAbortTimer(
       taskSet: TaskSetManager,
@@ -539,6 +550,16 @@ private[spark] class TaskSchedulerImpl(
     Random.shuffle(offers)
   }
 
+  //============================statusUpdate start =====================================================
+
+  /**
+    * 调用者是SchedulerBackend，用途是SchedulerBackend会将task执行的状态回报给taskScheduler做一些决定
+    * task finish 包括四种状态：finished、killed、failed、lost。只有finished是成功执行完成来，其它三种都是失败的
+    *
+    * @param tid
+    * @param state
+    * @param serializedData
+    */
   def statusUpdate(tid: Long, state: TaskState, serializedData: ByteBuffer) {
     var failedExecutor: Option[String] = None
     var reason: Option[ExecutorLossReason] = None
@@ -546,14 +567,16 @@ private[spark] class TaskSchedulerImpl(
       try {
         Option(taskIdToTaskSetManager.get(tid)) match {
           case Some(taskSet) =>
+            // 若taskLost：找到该task对应的executor，从active executor里移出，避免这个executor被分配到其他task继续失败下去。
             if (state == TaskState.LOST) {
-              // TaskState.LOST is only used by the deprecated Mesos fine-grained scheduling mode,
-              // where each executor corresponds to a single task, so mark the executor as failed.
+              // TaskState.LOST 仅由不推荐使用的Mesos细粒度调度模式使用，
+              // 其中每个执行程序对应于单个任务，因此将执行程序标记为失败。
               val execId = taskIdToExecutorId.getOrElse(tid, throw new IllegalStateException(
                 "taskIdToTaskSetManager.contains(tid) <=> taskIdToExecutorId.contains(tid)"))
               if (executorIdToRunningTaskIds.contains(execId)) {
                 reason = Some(
                   SlaveLost(s"Task $tid was lost, so marking the executor as lost as well."))
+                //从active executor里移出，避免这个executor被分配到其他task继续失败下去
                 removeExecutor(execId, reason.get)
                 failedExecutor = Some(execId)
               }
@@ -561,12 +584,18 @@ private[spark] class TaskSchedulerImpl(
             if (TaskState.isFinished(state)) {
               cleanupTaskState(tid)
               taskSet.removeRunningTask(tid)
+              //task完成执行后
               if (state == TaskState.FINISHED) {
+                //执行成功时调用
                 taskResultGetter.enqueueSuccessfulTask(taskSet, tid, serializedData)
               } else if (Set(TaskState.FAILED, TaskState.KILLED, TaskState.LOST).contains(state)) {
+                //执行失败时调用
                 taskResultGetter.enqueueFailedTask(taskSet, tid, state, serializedData)
               }
+              //TaskResultGetter内部维护里一个线程池，负责一步fetch task执行结果并反序列话，
+              // 默认四个线程做这件事，可配参数（spark.resultGetter.threads=4）
             }
+
           case None =>
             logError(
               ("Ignoring update with state %s for TID %s because its task set is gone (this is " +
@@ -578,14 +607,14 @@ private[spark] class TaskSchedulerImpl(
         case e: Exception => logError("Exception in statusUpdate", e)
       }
     }
-    // Update the DAGScheduler without holding a lock on this, since that can deadlock
+    // 更新DAGScheduler而不对其进行锁定，因为这可能会死锁
     if (failedExecutor.isDefined) {
       assert(reason.isDefined)
       dagScheduler.executorLost(failedExecutor.get, reason.get)
       backend.reviveOffers()
     }
   }
-
+//============================statusUpdate end =====================================================
   /**
    * Update metrics for in-progress tasks and executor metrics, and let the master know that the
    * BlockManager is still alive. Return true if the driver knows about the given block manager.

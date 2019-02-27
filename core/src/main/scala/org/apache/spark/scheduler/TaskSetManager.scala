@@ -125,8 +125,7 @@ private[spark] class TaskSetManager(
   // TODO: We should kill any running task attempts when the task set manager becomes a zombie.
   private[scheduler] var isZombie = false
 
-  // Whether the taskSet run tasks from a barrier stage. Spark must launch all the tasks at the
-  // same time for a barrier stage.
+  // taskSet是否从barrier stage运行task。 Spark必须为barrier stage同时启动所有任务。
   private[scheduler] def isBarrier = taskSet.tasks.nonEmpty && taskSet.tasks(0).isBarrier
 
   // Set of pending tasks for each executor. These collections are actually

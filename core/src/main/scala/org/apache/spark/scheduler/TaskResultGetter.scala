@@ -54,6 +54,13 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
     }
   }
 
+  /**
+    * 任务成功
+    * @param taskSetManager
+    * @param tid
+    * @param serializedData
+    */
+
   def enqueueSuccessfulTask(
       taskSetManager: TaskSetManager,
       tid: Long,
@@ -124,6 +131,9 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
     })
   }
 
+  /**
+    * 任务失败找到失败理由回传
+    */
   def enqueueFailedTask(taskSetManager: TaskSetManager, tid: Long, taskState: TaskState,
     serializedData: ByteBuffer) {
     var reason : TaskFailedReason = UnknownReason
