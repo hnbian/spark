@@ -18,7 +18,7 @@
 package org.apache.spark.scheduler
 
 /**
- * Represents free resources available on an executor.
+ * executor可以自由使用的资源.
  */
 private[spark]
 case class WorkerOffer(

@@ -207,9 +207,10 @@ private[spark] class TaskSchedulerImpl(
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
     this.synchronized {
       /**
-        * 为task创建一个taskSetManager,添加到队列里。TaskSetManager 跟踪每个task的执行状况，维护了task的许多具体信
+        * 为task创建一个taskSetManager,添加到队列里。TaskSetManager 跟踪每个task的执行状况，维护了task的许多具体信息
         */
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
+      //获取taskSet所属的stageid
       val stage = taskSet.stageId
       val stageTaskSets =
         taskSetsByStageIdAndAttempt.getOrElseUpdate(stage, new HashMap[Int, TaskSetManager])
@@ -221,6 +222,7 @@ private[spark] class TaskSchedulerImpl(
         throw new IllegalStateException(s"more than one active taskSet for stage $stage:" +
           s" ${stageTaskSets.toSeq.map{_._2.taskSet.id}.mkString(",")}")
       }
+      //将taskSetManager加入队列 有两个实现=》先入先出、公平调度
       schedulableBuilder.addTaskSetManager(manager, manager.taskSet.properties)
 
       if (!isLocal && !hasReceivedTask) {
@@ -250,9 +252,9 @@ private[spark] class TaskSchedulerImpl(
 
   override def cancelTasks(stageId: Int, interruptThread: Boolean): Unit = synchronized {
     logInfo("Cancelling stage " + stageId)
-    // 取消stage的task。
+    // 取消stage的task
     killAllTaskAttempts(stageId, interruptThread, reason = "Stage cancelled")
-    // 取消该stage所有的 attempts。
+    // 取消该stage所有的 attempts
     taskSetsByStageIdAndAttempt.get(stageId).foreach { attempts =>
       attempts.foreach { case (_, tsm) =>
         tsm.abort("Stage %s cancelled".format(stageId))
@@ -356,13 +358,13 @@ private[spark] class TaskSchedulerImpl(
   }
 
   /**
-   * Called by cluster manager to offer resources on slaves. We respond by asking our active task
-   * sets for tasks in order of priority. We fill each node with tasks in a round-robin manner so
-   * that tasks are balanced across the cluster.
+    * 由cluster manager 调用 提供slaves上的资源，
+    * 我们通过按优先顺序询问我们的活跃的任务集来执行任务
+    * 我们以轮询方式为每个节点指派任务，以便在整个集群中平衡任务。
    */
   def resourceOffers(offers: IndexedSeq[WorkerOffer]): Seq[Seq[TaskDescription]] = synchronized {
-    // Mark each slave as alive and remember its hostname
-    // Also track if new executor is added
+    // 标记每个slave是可用的并且记录它的hostname
+    // 如果添加了新的executor也会一起跟踪
     var newExecAvail = false
     for (o <- offers) {
       if (!hostToExecutors.contains(o.host)) {

@@ -41,7 +41,7 @@ private[spark] trait SchedulableBuilder {
 
   def addTaskSetManager(manager: Schedulable, properties: Properties): Unit
 }
-
+//构建先入先出调度
 private[spark] class FIFOSchedulableBuilder(val rootPool: Pool)
   extends SchedulableBuilder with Logging {
 
@@ -53,7 +53,7 @@ private[spark] class FIFOSchedulableBuilder(val rootPool: Pool)
     rootPool.addSchedulable(manager)
   }
 }
-
+//构建公平调度
 private[spark] class FairSchedulableBuilder(val rootPool: Pool, conf: SparkConf)
   extends SchedulableBuilder with Logging {
 
