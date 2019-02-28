@@ -39,12 +39,9 @@ import org.apache.spark.scheduler.cluster.CoarseGrainedSchedulerBackend.ENDPOINT
 import org.apache.spark.util.{RpcUtils, SerializableBuffer, ThreadUtils, Utils}
 
 /**
- * A scheduler backend that waits for coarse-grained executors to connect.
- * This backend holds onto each executor for the duration of the Spark job rather than relinquishing
- * executors whenever a task is done and asking the scheduler to launch a new executor for
- * each new task. Executors may be launched in a variety of ways, such as Mesos tasks for the
- * coarse-grained Mesos mode or standalone processes for Spark's standalone deploy mode
- * (spark.deploy.*).
+  * 调度程序后端代码，等待粗粒度执行程序连接。
+  * 在Spark执行期间保留每个executor，不会在程序完成时关闭executor,在新的任务进来时不会创建新的executor。
+  * executor可以以多种方式运行，比如粗粒度mesos模式下或者standalone
  */
 private[spark]
 class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: RpcEnv)
@@ -137,11 +134,20 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
     }
 
     override def receive: PartialFunction[Any, Unit] = {
+      /**
+        * task 的状态回调
+        */
       case StatusUpdate(executorId, taskId, state, data) =>
+        //首先调用scheduler.statusUpdate(taskId, state, data.value) 上报上去
         scheduler.statusUpdate(taskId, state, data.value)
+        //然后判断这个task是否执行结束了
         if (TaskState.isFinished(state)) {
+          //如果执行结束了
           executorDataMap.get(executorId) match {
+              //匹配ExecutorData
             case Some(executorInfo) =>
+              //把executor上的freeCore 加上去, 调用一次makeOffer()
+              //这个事件就是别人直接向SchedulerBackend请求资源, 直接调用makeOffer()
               executorInfo.freeCores += scheduler.CPUS_PER_TASK
               makeOffers(executorId)
             case None =>
@@ -151,10 +157,13 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           }
         }
 
+        //直接调用了makeOffers()方法，等到一批和执行的任务描述(taskSet) , 调用launchTasks
       case ReviveOffers =>
         makeOffers()
 
+        //killTask
       case KillTask(taskId, executorId, interruptThread, reason) =>
+        //找出executorid对应的executor 然后杀掉task
         executorDataMap.get(executorId) match {
           case Some(executorInfo) =>
             executorInfo.executorEndpoint.send(
@@ -173,30 +182,45 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
       case UpdateDelegationTokens(newDelegationTokens) =>
         updateDelegationTokens(newDelegationTokens)
 
+
       case RemoveExecutor(executorId, reason) =>
-        // We will remove the executor's state and cannot restore it. However, the connection
-        // between the driver and the executor may be still alive so that the executor won't exit
-        // automatically, so try to tell the executor to stop itself. See SPARK-13519.
+
+        /**
+          * 我们将删除executor的状态，无法恢复它。
+          * 但是，Driver和executor之间的连接可能仍然存在，
+          * 因此执行程序不会自动退出，因此请尝试告诉执行程序自行停止。
+          * 见SPARK-13519。
+          *
+          */
         executorDataMap.get(executorId).foreach(_.executorEndpoint.send(StopExecutor))
         removeExecutor(executorId, reason)
     }
 
     override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
 
+      /**
+        * 用来注册executor，通常worker拉起、重启会触发executor的注册，
+        * CoarseGrainedSchedulerBackend会把这些executor维护起来，更新内部的资源，比如综合书增加，最后调用一次makeOffer()
+        * 即把目前空闲资源丢给taskScheduler去分配一次
+        * 返回taskSet，把任务启动起来，这个makeOffer() 的调用会出现在任何资源变化的事件中，下面会看到
+        */
       case RegisterExecutor(executorId, executorRef, hostname, cores, logUrls, attributes) =>
         if (executorDataMap.contains(executorId)) {
           executorRef.send(RegisterExecutorFailed("Duplicate executor ID: " + executorId))
           context.reply(true)
         } else if (scheduler.nodeBlacklist.contains(hostname)) {
-          // If the cluster manager gives us an executor on a blacklisted node (because it
-          // already started allocating those resources before we informed it of our blacklist,
-          // or if it ignored our blacklist), then we reject that executor immediately.
+          /**
+            * 如果cluster manager 在黑名单节点上给我们一个executor
+            * （因为它在我们通知我们的黑名单之前已经开始分配这些资源，或者它忽略了我们的黑名单），
+            * 那么我们立即拒绝该执行者。
+            */
           logInfo(s"Rejecting $executorId as it has been blacklisted.")
           executorRef.send(RegisterExecutorFailed(s"Executor is blacklisted: $executorId"))
           context.reply(true)
         } else {
-          // If the executor's rpc env is not listening for incoming connections, `hostPort`
-          // will be null, and the client connection should be used to contact the executor.
+          /**
+            * 如果executor的rpc env 没有监听到传入连接，则 hostPort 将设置为null，并且应该使用client 连接executor
+            */
           val executorAddress = if (executorRef.address != null) {
               executorRef.address
             } else {
@@ -208,8 +232,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           totalRegisteredExecutors.addAndGet(1)
           val data = new ExecutorData(executorRef, executorAddress, hostname,
             cores, cores, logUrls, attributes)
-          // This must be synchronized because variables mutated
-          // in this block are read when requesting executors
+          // 这必须同步，因为在请求executor时会读取此块中变异的变量
           CoarseGrainedSchedulerBackend.this.synchronized {
             executorDataMap.put(executorId, data)
             if (currentExecutorIdCounter < executorId.toInt) {
@@ -221,7 +244,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
             }
           }
           executorRef.send(RegisteredExecutor)
-          // Note: some tests expect the reply to come after we put the executor in the map
+          // 注意：一些测试期望在我们将执行程序放入映射之后得到答复
           context.reply(true)
           listenerBus.post(
             SparkListenerExecutorAdded(System.currentTimeMillis(), executorId, data))
@@ -232,6 +255,9 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
         context.reply(true)
         stop()
 
+      /**
+        * 通知每个executor 处理stopExecutor事件
+        */
       case StopExecutors =>
         logInfo("Asking each executor to shut down")
         for ((_, executorData) <- executorDataMap) {
@@ -251,11 +277,11 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
         context.reply(reply)
     }
 
-    // Make fake resource offers on all executors
+    // 为所有executor提供虚拟资源
     private def makeOffers() {
-      // Make sure no executor is killed while some task is launching on it
+      // 确保在某个任务启动时没有executor被杀死
       val taskDescs = CoarseGrainedSchedulerBackend.this.synchronized {
-        // Filter out executors under killing
+        // 过滤出活跃的executor
         val activeExecutors = executorDataMap.filterKeys(executorIsAlive)
         val workOffers = activeExecutors.map {
           case (id, executorData) =>
@@ -302,10 +328,12 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
         !executorsPendingLossReason.contains(executorId)
     }
 
-    // Launch tasks returned by a set of resource offers
+    // 启动一组提供资源的 task
     private def launchTasks(tasks: Seq[Seq[TaskDescription]]) {
       for (task <- tasks.flatten) {
+        //将task转换为二进制
         val serializedTask = TaskDescription.encode(task)
+        //判断二进制数据大小，如果二进制数据超过最大范围则报错
         if (serializedTask.limit() >= maxRpcMessageSize) {
           Option(scheduler.taskIdToTaskSetManager.get(task.taskId)).foreach { taskSetMgr =>
             try {
@@ -325,19 +353,21 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
 
           logDebug(s"Launching task ${task.taskId} on executor id: ${task.executorId} hostname: " +
             s"${executorData.executorHost}.")
-
+          //将task 发送给executor执行
           executorData.executorEndpoint.send(LaunchTask(new SerializableBuffer(serializedTask)))
         }
       }
     }
 
-    // Remove a disconnected slave from the cluster
+    /**
+      * 从集群中移除一个断开连接的slave
+      */
     private def removeExecutor(executorId: String, reason: ExecutorLossReason): Unit = {
       logDebug(s"Asked to remove executor $executorId with reason $reason")
       executorDataMap.get(executorId) match {
+          //通过executorId匹配executor
         case Some(executorInfo) =>
-          // This must be synchronized because variables mutated
-          // in this block are read when requesting executors
+          //这必须同步，因为在请求executor时会读取此块中变异的变量
           val killed = CoarseGrainedSchedulerBackend.this.synchronized {
             addressToExecutorId -= executorInfo.executorAddress
             executorDataMap -= executorId
@@ -346,6 +376,12 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val rpcEnv: Rp
           }
           totalCoreCount.addAndGet(-executorInfo.totalCores)
           totalRegisteredExecutors.addAndGet(-1)
+          // TaskScheduler.executorLost() 方法, 通知上层我这边有一批资源不能用了,你处理下吧，
+          // TaskScheduler会继续把 executorLost事件上报给DAGScheduler,
+          // 原因是DAGScheduler关心shuffle任务的outputlocation,
+          // DAGScheduler会告诉BlockManager这个executor不能用了,然后移走它,
+          // 然后把所有的stage的shuffleOutput信息都遍历一遍, 移走这个executor,
+          // 并且更新后的shuffleoutput信息注册到MapOutputTracker 上, 最后清理下本地的CacheLocationsMap
           scheduler.executorLost(executorId, if (killed) ExecutorKilled else reason)
           listenerBus.post(
             SparkListenerExecutorRemoved(System.currentTimeMillis(), executorId, reason.toString))

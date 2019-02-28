@@ -33,7 +33,7 @@ import org.apache.spark.scheduler._
 import org.apache.spark.util.Utils
 
 /**
- * A [[SchedulerBackend]] implementation for Spark's standalone cluster manager.
+ * A [[SchedulerBackend]] 针对spark standalone 集群模式的实现
  */
 private[spark] class StandaloneSchedulerBackend(
     scheduler: TaskSchedulerImpl,

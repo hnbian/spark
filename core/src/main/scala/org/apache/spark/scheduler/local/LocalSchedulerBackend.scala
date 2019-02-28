@@ -39,9 +39,11 @@ private case class KillTask(taskId: Long, interruptThread: Boolean, reason: Stri
 private case class StopExecutor()
 
 /**
- * Calls to [[LocalSchedulerBackend]] are all serialized through LocalEndpoint. Using an
- * RpcEndpoint makes the calls on [[LocalSchedulerBackend]] asynchronous, which is necessary
- * to prevent deadlock between [[LocalSchedulerBackend]] and the [[TaskSchedulerImpl]].
+  * 本地调度器,在本地版的spark时使用,
+  * 其中 executor, backend，master 都运行在相同的jvm中, 它位于 TaskSchedulerImpl的下一层,
+  * 在本地运行单个executor (由 LocalSchedulerBackend创建) 上处理启动等任务
+  * 对[[LocalSchedulerBackend]]的调用都是通过LocalEndpoint序列化的。 使用RpcEndpoint使[[LocalSchedulerBackend]]上的调用异步，这是必要的
+  * * 防止[[LocalSchedulerBackend]]和[[TaskSchedulerImpl]]之间的死锁。
  */
 private[spark] class LocalEndpoint(
     override val rpcEnv: RpcEnv,
