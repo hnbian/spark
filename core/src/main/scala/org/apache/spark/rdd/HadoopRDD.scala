@@ -44,6 +44,7 @@ import org.apache.spark.util.{NextIterator, SerializableConfiguration, ShutdownH
 
 /**
  * A Spark split class that wraps around a Hadoop InputSplit.
+  * 从hadoop文件系统获得到的HadoopRDD
  */
 private[spark] class HadoopPartition(rddId: Int, override val index: Int, s: InputSplit)
   extends Partition {

@@ -19,5 +19,6 @@ package org.apache.spark
 
 /**
  * Provides several RDD implementations. See [[org.apache.spark.rdd.RDD]].
+  * 提供几种RDD实现。详情查看[[org.apache.spark.rdd.RDD]].
  */
 package object rdd
