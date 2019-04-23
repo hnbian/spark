@@ -34,6 +34,7 @@ import org.apache.spark.util.Utils
  * The [[org.apache.spark.storage.StorageLevel]] singleton object contains some static constants
  * for commonly useful storage levels. To create your own storage level object, use the
  * factory method of the singleton object (`StorageLevel(...)`).
+  * 存储级别源码
  */
 @DeveloperApi
 class StorageLevel private(

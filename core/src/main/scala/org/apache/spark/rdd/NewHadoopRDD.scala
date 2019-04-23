@@ -40,6 +40,12 @@ import org.apache.spark.rdd.NewHadoopRDD.NewHadoopMapPartitionsWithSplitRDD
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.util.{SerializableConfiguration, ShutdownHookManager}
 
+/**
+  * 从hadoop文件系统获得数据的RDD
+  * @param rddId
+  * @param index
+  * @param rawSplit
+  */
 private[spark] class NewHadoopPartition(
     rddId: Int,
     val index: Int,
