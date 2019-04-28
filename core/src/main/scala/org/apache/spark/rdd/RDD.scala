@@ -131,11 +131,13 @@ abstract class RDD[T: ClassTag](
   /**
    * Implemented by subclasses to return how this RDD depends on parent RDDs. This method will only
    * be called once, so it is safe to implement a time-consuming computation in it.
+    * 获得依赖
    */
   protected def getDependencies: Seq[Dependency[_]] = deps
 
   /**
    * Optionally overridden by subclasses to specify placement preferences.
+    * 获取最优存储地址
    */
   protected def getPreferredLocations(split: Partition): Seq[String] = Nil
 
@@ -163,6 +165,7 @@ abstract class RDD[T: ClassTag](
 
   /**
    * Mark this RDD for persisting using the specified level.
+    * 缓存持久化
    *
    * @param newLevel the target storage level
    * @param allowOverride whether to override any existing level with the new one
