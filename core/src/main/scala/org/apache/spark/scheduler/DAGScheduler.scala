@@ -112,6 +112,7 @@ import org.apache.spark.util._
  *
  *  - When adding a new data structure, update `DAGSchedulerSuite.assertDataStructuresEmpty` to
  *    include the new structure. This will help to catch memory leaks.
+  *    DAG调度器
  */
 private[spark] class DAGScheduler(
     private[scheduler] val sc: SparkContext,

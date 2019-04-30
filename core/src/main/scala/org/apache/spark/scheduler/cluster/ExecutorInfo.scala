@@ -21,6 +21,7 @@ import org.apache.spark.annotation.DeveloperApi
 /**
  * :: DeveloperApi ::
  * Stores information about an executor to pass from the scheduler to SparkListeners.
+  * Executor信息
  */
 @DeveloperApi
 class ExecutorInfo(
